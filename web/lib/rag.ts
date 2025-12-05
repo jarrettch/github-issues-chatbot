@@ -1,20 +1,24 @@
 import fs from 'fs/promises';
+import path from 'path';
 import { openai } from '@ai-sdk/openai';
 import { embed } from 'ai';
 
-let embeddings = null;
+let embeddings: any[] | null = null;
 
 export async function loadEmbeddings() {
   if (!embeddings) {
     console.log('Loading embeddings...');
-    const data = await fs.readFile('embeddings.json', 'utf-8');
+    // Get the path relative to the web directory
+    const embeddingsPath = path.join(process.cwd(), '..', 'embeddings.json');
+    console.log('Embeddings path:', embeddingsPath);
+    const data = await fs.readFile(embeddingsPath, 'utf-8');
     embeddings = JSON.parse(data);
     console.log(`Loaded ${embeddings.length} embeddings`);
   }
   return embeddings;
 }
 
-function cosineSimilarity(a, b) {
+function cosineSimilarity(a: number[], b: number[]): number {
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -28,23 +32,20 @@ function cosineSimilarity(a, b) {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-export async function searchSimilarIssues(query, topK = 5) {
+export async function searchSimilarIssues(query: string, topK = 5) {
   const embeddingsList = await loadEmbeddings();
 
-  // Generate embedding for the query
   const embeddingModel = openai.embedding('text-embedding-3-small');
   const { embedding: queryEmbedding } = await embed({
     model: embeddingModel,
     value: query
   });
 
-  // Calculate similarity scores
   const results = embeddingsList.map(doc => ({
     ...doc,
     similarity: cosineSimilarity(queryEmbedding, doc.embedding)
   }));
 
-  // Sort by similarity (descending) and return top K
   results.sort((a, b) => b.similarity - a.similarity);
 
   return results.slice(0, topK).map(result => ({
@@ -55,16 +56,15 @@ export async function searchSimilarIssues(query, topK = 5) {
   }));
 }
 
-export function extractIssueNumbers(text) {
-  // Match patterns like #1234 or "issue 1234" or "issue #1234"
+export function extractIssueNumbers(text: string): number[] {
   const patterns = [
-    /#(\d+)/g,                           // #1234
-    /issue\s+#?(\d+)/gi,                 // issue 1234, issue #1234
-    /issues?\s+#?(\d+)/gi,               // issues 1234
-    /\b(\d{4,})\b/g,                     // standalone 4+ digit numbers (likely issue/PR numbers)
+    /#(\d+)/g,
+    /issue\s+#?(\d+)/gi,
+    /issues?\s+#?(\d+)/gi,
+    /\b(\d{4,})\b/g,
   ];
 
-  const issueNumbers = new Set();
+  const issueNumbers = new Set<number>();
 
   for (const pattern of patterns) {
     const matches = text.matchAll(pattern);
@@ -76,7 +76,7 @@ export function extractIssueNumbers(text) {
   return Array.from(issueNumbers);
 }
 
-export async function getIssuesByNumber(issueNumbers) {
+export async function getIssuesByNumber(issueNumbers: number[]) {
   const embeddingsList = await loadEmbeddings();
   const issues = [];
 
@@ -87,7 +87,7 @@ export async function getIssuesByNumber(issueNumbers) {
         id: issue.id,
         text: issue.text,
         metadata: issue.metadata,
-        similarity: 1.0, // Explicitly requested, so mark as 100% relevant
+        similarity: 1.0,
         explicit: true
       });
     }
@@ -96,24 +96,16 @@ export async function getIssuesByNumber(issueNumbers) {
   return issues;
 }
 
-export async function searchSimilarIssuesWithExplicit(query, topK = 5) {
-  // Extract any explicitly mentioned issue numbers
+export async function searchSimilarIssuesWithExplicit(query: string, topK = 5) {
   const explicitIssueNumbers = extractIssueNumbers(query);
-
-  // Get explicitly mentioned issues
   const explicitIssues = await getIssuesByNumber(explicitIssueNumbers);
-
-  // Perform semantic search
   const semanticResults = await searchSimilarIssues(query, topK);
 
-  // Combine results, prioritizing explicit mentions
-  // Remove any semantic results that are already in explicit results
   const explicitNumbers = new Set(explicitIssues.map(i => i.metadata.number));
   const filteredSemanticResults = semanticResults.filter(
     r => !explicitNumbers.has(r.metadata.number)
   );
 
-  // Combine: explicit issues first, then semantic results (up to topK total)
   const combined = [
     ...explicitIssues,
     ...filteredSemanticResults.slice(0, Math.max(0, topK - explicitIssues.length))
@@ -122,15 +114,15 @@ export async function searchSimilarIssuesWithExplicit(query, topK = 5) {
   return combined;
 }
 
-export function formatIssuesContext(results) {
-  return results.map((result, index) => {
+export function formatIssuesContext(results: any[]) {
+  return results.map((result) => {
     const relevanceLabel = result.explicit
       ? 'Explicitly mentioned'
       : `${(result.similarity * 100).toFixed(1)}% match`;
 
     const linkedPRs = result.metadata.linked_prs || [];
     const prLinks = linkedPRs.length > 0
-      ? linkedPRs.map(pr => `https://github.com/vercel/ai/pull/${pr}`).join(', ')
+      ? linkedPRs.map((pr: number) => `https://github.com/vercel/ai/pull/${pr}`).join(', ')
       : 'None';
 
     return `

@@ -1,6 +1,6 @@
 import { openai } from '@ai-sdk/openai';
 import { streamText } from 'ai';
-import { searchSimilarIssues, formatIssuesContext } from './rag.js';
+import { searchSimilarIssuesWithExplicit, formatIssuesContext } from './rag.js';
 import * as readline from 'readline';
 import dotenv from 'dotenv';
 
@@ -17,11 +17,40 @@ function question(prompt) {
   });
 }
 
+function buildConversationAwareQuery(userMessage, conversationHistory) {
+  // Get recent conversation context (last 2 turns)
+  const recentHistory = conversationHistory.slice(-4); // Last 2 user + 2 assistant messages
+
+  if (recentHistory.length === 0) {
+    return userMessage;
+  }
+
+  // Build context from recent messages
+  const contextParts = [];
+
+  for (const msg of recentHistory) {
+    if (msg.role === 'user') {
+      contextParts.push(msg.content);
+    } else if (msg.role === 'assistant') {
+      // Extract key topics from assistant's response (first 100 chars as summary)
+      const summary = msg.content.substring(0, 100).replace(/\n/g, ' ');
+      contextParts.push(summary);
+    }
+  }
+
+  // Combine context with current query
+  const conversationContext = contextParts.join(' ');
+  return `${conversationContext}\n\nCurrent question: ${userMessage}`;
+}
+
 async function chat(userMessage, conversationHistory = []) {
   console.log('\n🔍 Searching for relevant issues...');
 
-  // Retrieve relevant issues using RAG
-  const relevantIssues = await searchSimilarIssues(userMessage, 5);
+  // Build conversation-aware search query
+  const searchQuery = buildConversationAwareQuery(userMessage, conversationHistory);
+
+  // Retrieve relevant issues using RAG with explicit issue lookup
+  const relevantIssues = await searchSimilarIssuesWithExplicit(searchQuery, 5);
   const context = formatIssuesContext(relevantIssues);
 
   console.log(`\n✓ Found ${relevantIssues.length} relevant issues\n`);
@@ -65,7 +94,8 @@ Use this information to provide accurate, helpful answers. When referencing spec
       number: issue.metadata.number,
       title: issue.metadata.title,
       url: issue.metadata.url,
-      similarity: issue.similarity
+      similarity: issue.similarity,
+      explicit: issue.explicit
     }))
   };
 }
@@ -100,7 +130,10 @@ async function main() {
       // Show relevant issues referenced
       console.log('📚 Referenced Issues:');
       relevantIssues.forEach(issue => {
-        console.log(`  - #${issue.number}: ${issue.title} (${(issue.similarity * 100).toFixed(1)}% match)`);
+        const relevanceLabel = issue.explicit
+          ? 'Explicitly mentioned'
+          : `${(issue.similarity * 100).toFixed(1)}% match`;
+        console.log(`  - #${issue.number}: ${issue.title} (${relevanceLabel})`);
         console.log(`    ${issue.url}`);
       });
       console.log('');

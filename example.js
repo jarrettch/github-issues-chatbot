@@ -1,6 +1,6 @@
 import { openai } from '@ai-sdk/openai';
 import { streamText } from 'ai';
-import { searchSimilarIssues, formatIssuesContext } from './rag.js';
+import { searchSimilarIssuesWithExplicit, formatIssuesContext } from './rag.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -8,7 +8,7 @@ dotenv.config();
 async function askQuestion(question) {
   console.log(`\n❓ Question: ${question}\n`);
 
-  const relevantIssues = await searchSimilarIssues(question, 5);
+  const relevantIssues = await searchSimilarIssuesWithExplicit(question, 5);
   const context = formatIssuesContext(relevantIssues);
 
   const systemPrompt = `You are a helpful assistant that answers questions about issues in the Vercel AI SDK GitHub repository.
@@ -33,8 +33,11 @@ Provide accurate answers based on these issues. Include issue numbers and links 
 
   console.log('\n\n📚 Top Relevant Issues:');
   relevantIssues.forEach((issue, i) => {
+    const relevanceLabel = issue.explicit
+      ? 'Explicitly mentioned'
+      : `${(issue.similarity * 100).toFixed(1)}% match`;
     console.log(`${i + 1}. #${issue.metadata.number}: ${issue.metadata.title}`);
-    console.log(`   ${issue.metadata.url} (${(issue.similarity * 100).toFixed(1)}% match)\n`);
+    console.log(`   ${issue.metadata.url} (${relevanceLabel})\n`);
   });
 }
 

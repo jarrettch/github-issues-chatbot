@@ -9,7 +9,8 @@
     "generate-embeddings": "node generate-embeddings.js",
     "setup": "npm run fetch-issues && npm run generate-embeddings",
     "chat": "node chatbot.js",
-    "example": "node example.js"
+    "example": "node example.js",
+    "web": "cd web && npm run dev"
   },
   "keywords": ["ai", "chatbot", "rag", "github", "vercel-ai-sdk"],
   "author": "",

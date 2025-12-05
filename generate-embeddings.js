@@ -5,6 +5,17 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+function truncateText(text, maxTokens = 6000) {
+  // Rough estimate: 1 token ≈ 4 characters
+  const maxChars = maxTokens * 4;
+
+  if (text.length <= maxChars) {
+    return text;
+  }
+
+  return text.slice(0, maxChars) + '\n\n[... truncated for length ...]';
+}
+
 async function generateEmbeddings() {
   console.log('Loading issues data...');
 
@@ -32,9 +43,12 @@ ${issue.body}
 ${commentsText ? `Comments:\n${commentsText}` : ''}
     `.trim();
 
+    // Truncate to fit within embedding model context window
+    const truncatedText = truncateText(fullText);
+
     documents.push({
       id: `issue-${issue.number}`,
-      text: fullText,
+      text: truncatedText,
       metadata: {
         number: issue.number,
         title: issue.title,
@@ -42,7 +56,8 @@ ${commentsText ? `Comments:\n${commentsText}` : ''}
         labels: issue.labels,
         url: issue.url,
         created_at: issue.created_at,
-        updated_at: issue.updated_at
+        updated_at: issue.updated_at,
+        linked_prs: issue.linked_prs || []
       }
     });
   }
@@ -57,17 +72,22 @@ ${commentsText ? `Comments:\n${commentsText}` : ''}
     const batch = documents.slice(i, i + batchSize);
     console.log(`Processing batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(documents.length / batchSize)}...`);
 
-    const { embeddings } = await embedMany({
-      model: embeddingModel,
-      values: batch.map(doc => doc.text)
-    });
-
-    batch.forEach((doc, index) => {
-      allEmbeddings.push({
-        ...doc,
-        embedding: embeddings[index]
+    try {
+      const { embeddings } = await embedMany({
+        model: embeddingModel,
+        values: batch.map(doc => doc.text)
       });
-    });
+
+      batch.forEach((doc, index) => {
+        allEmbeddings.push({
+          ...doc,
+          embedding: embeddings[index]
+        });
+      });
+    } catch (error) {
+      console.error(`Error processing batch: ${error.message}`);
+      console.log('Continuing with next batch...');
+    }
   }
 
   await fs.writeFile('embeddings.json', JSON.stringify(allEmbeddings, null, 2));
