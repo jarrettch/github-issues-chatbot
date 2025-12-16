@@ -5,7 +5,6 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Send, Github, Loader2 } from 'lucide-react';
@@ -74,18 +73,18 @@ export default function Home() {
         </div>
 
         {/* Main Content */}
-        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-6 overflow-hidden min-h-0">
+        <div className="flex-1 grid grid-cols-1 lg:grid-cols-3 gap-6 min-h-0">
           {/* Chat Area */}
-          <Card className="lg:col-span-2 flex flex-col bg-white/5 border-white/10 min-h-0">
-            <CardHeader className="border-b border-white/10">
+          <Card className="lg:col-span-2 flex flex-col bg-white/5 border-white/10 overflow-hidden">
+            <CardHeader className="border-b border-white/10 flex-shrink-0">
               <CardTitle className="text-white">Chat</CardTitle>
               <CardDescription className="text-zinc-400">
                 Ask about issues, PRs, features, or bugs
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex-1 flex flex-col overflow-hidden p-4 min-h-0">
+            <CardContent className="flex-1 flex flex-col p-4 min-h-0">
               {/* Messages */}
-              <ScrollArea className="flex-1 pr-4 mb-4">
+              <div className="flex-1 overflow-y-auto pr-4 mb-4 min-h-0">
                 {messages.length === 0 ? (
                   <div className="h-full flex items-center justify-center text-center text-muted-foreground">
                     <div>
@@ -122,10 +121,10 @@ export default function Home() {
                     )}
                   </div>
                 )}
-              </ScrollArea>
+              </div>
 
               {/* Input */}
-              <form onSubmit={onSubmit} className="flex gap-2">
+              <form onSubmit={onSubmit} className="flex gap-2 flex-shrink-0">
                 <Input
                   value={input}
                   onChange={handleInputChange}
@@ -141,15 +140,15 @@ export default function Home() {
           </Card>
 
           {/* Referenced Issues Sidebar */}
-          <Card className="flex flex-col bg-white/5 border-white/10 min-h-0">
-            <CardHeader className="border-b border-white/10">
+          <Card className="flex flex-col bg-white/5 border-white/10 overflow-hidden">
+            <CardHeader className="border-b border-white/10 flex-shrink-0">
               <CardTitle className="text-white">Referenced Issues</CardTitle>
               <CardDescription className="text-zinc-400">
                 Issues found for your question
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex-1 overflow-hidden p-4 min-h-0">
-              <ScrollArea className="h-full pr-4">
+            <CardContent className="flex-1 p-4 min-h-0">
+              <div className="h-full overflow-y-auto pr-4">
                 {relevantIssues.length === 0 ? (
                   <div className="text-center text-sm text-muted-foreground pt-8">
                     Ask a question to see relevant issues
@@ -206,7 +205,7 @@ export default function Home() {
                     ))}
                   </div>
                 )}
-              </ScrollArea>
+              </div>
             </CardContent>
           </Card>
         </div>
