@@ -42,7 +42,12 @@ User question: ${userMessage}`,
 
 export async function POST(req: Request) {
   const { messages } = await req.json();
-  const userMessage = messages[messages.length - 1].content;
+  const lastMsg = messages[messages.length - 1];
+  // Extract text from UIMessage parts or fall back to content string
+  const userMessage = lastMsg.parts
+    ?.filter((p: any) => p.type === 'text')
+    .map((p: any) => p.text)
+    .join('') || lastMsg.content || '';
 
   // Step 1: Query planning with Haiku
   const plan = await planQuery(userMessage);
@@ -108,7 +113,13 @@ Use this information to provide accurate, helpful answers. When referencing spec
   const result = streamText({
     model: anthropic('claude-sonnet-4-20250514'),
     system: systemPrompt,
-    messages,
+    messages: messages.map((m: any) => ({
+      role: m.role,
+      content: m.parts
+        ?.filter((p: any) => p.type === 'text')
+        .map((p: any) => p.text)
+        .join('') || m.content || '',
+    })),
   });
 
   return result.toTextStreamResponse();

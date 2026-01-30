@@ -1,6 +1,7 @@
 'use client';
 
-import { useChat } from 'ai/react';
+import { useChat } from '@ai-sdk/react';
+import { TextStreamChatTransport } from 'ai';
 import { useState, useEffect, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -20,14 +21,15 @@ interface RelevantIssue {
 
 export default function Home() {
   const [relevantIssues, setRelevantIssues] = useState<RelevantIssue[]>([]);
-  const [lastQuery, setLastQuery] = useState('');
+  const [input, setInput] = useState('');
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const { messages, input, handleInputChange, handleSubmit, isLoading } = useChat({
-    api: '/api/chat',
-    streamProtocol: 'text',
+  const { messages, sendMessage, status } = useChat({
+    transport: new TextStreamChatTransport({ api: '/api/chat' }),
   });
+
+  const isLoading = status === 'streaming' || status === 'submitted';
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -39,11 +41,8 @@ export default function Home() {
 
     if (!query) return;
 
-    // Store the query before form submission clears it
-    setLastQuery(query);
-
-    // Submit the form
-    handleSubmit(e);
+    setInput('');
+    sendMessage({ text: query });
 
     // Fetch relevant issues in parallel
     try {
@@ -100,24 +99,33 @@ export default function Home() {
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {messages.map((message) => (
-                      <div
-                        key={message.id}
-                        className={`flex ${
-                          message.role === 'user' ? 'justify-end' : 'justify-start'
-                        }`}
-                      >
+                    {messages.map((message) => {
+                      const textContent = message.parts
+                        ?.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+                        .map(p => p.text)
+                        .join('') || '';
+
+                      if (!textContent) return null;
+
+                      return (
                         <div
-                          className={`max-w-[80%] rounded-lg px-4 py-2 ${
-                            message.role === 'user'
-                              ? 'bg-blue-600 text-white'
-                              : 'bg-zinc-900 text-white border border-white/10'
+                          key={message.id}
+                          className={`flex ${
+                            message.role === 'user' ? 'justify-end' : 'justify-start'
                           }`}
                         >
-                          <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+                          <div
+                            className={`max-w-[80%] rounded-lg px-4 py-2 ${
+                              message.role === 'user'
+                                ? 'bg-blue-600 text-white'
+                                : 'bg-zinc-900 text-white border border-white/10'
+                            }`}
+                          >
+                            <p className="text-sm whitespace-pre-wrap">{textContent}</p>
+                          </div>
                         </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                     {isLoading && (
                       <div className="flex justify-start">
                         <div className="bg-zinc-900 border border-white/10 rounded-lg px-4 py-2">
@@ -134,7 +142,7 @@ export default function Home() {
               <form onSubmit={onSubmit} className="flex gap-2 flex-shrink-0">
                 <Input
                   value={input}
-                  onChange={handleInputChange}
+                  onChange={(e) => setInput(e.target.value)}
                   placeholder="Ask about an issue..."
                   disabled={isLoading}
                   className="flex-1 text-white"
