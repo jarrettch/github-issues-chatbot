@@ -1,67 +1,50 @@
-import fs from 'fs/promises';
+import { createClient } from '@supabase/supabase-js';
 import { openai } from '@ai-sdk/openai';
 import { embed } from 'ai';
 
-let embeddings = null;
-
-export async function loadEmbeddings() {
-  if (!embeddings) {
-    console.log('Loading embeddings...');
-    const data = await fs.readFile('embeddings.json', 'utf-8');
-    embeddings = JSON.parse(data);
-    console.log(`Loaded ${embeddings.length} embeddings`);
-  }
-  return embeddings;
-}
-
-function cosineSimilarity(a, b) {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+const supabase = createClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
 export async function searchSimilarIssues(query, topK = 5) {
-  const embeddingsList = await loadEmbeddings();
-
-  // Generate embedding for the query
   const embeddingModel = openai.embedding('text-embedding-3-small');
   const { embedding: queryEmbedding } = await embed({
     model: embeddingModel,
-    value: query
+    value: query,
   });
 
-  // Calculate similarity scores
-  const results = embeddingsList.map(doc => ({
-    ...doc,
-    similarity: cosineSimilarity(queryEmbedding, doc.embedding)
-  }));
+  const { data, error } = await supabase.rpc('match_issues', {
+    query_embedding: JSON.stringify(queryEmbedding),
+    match_count: topK,
+    match_threshold: 0.15,
+  });
 
-  // Sort by similarity (descending) and return top K
-  results.sort((a, b) => b.similarity - a.similarity);
+  if (error) throw new Error(`match_issues RPC error: ${error.message}`);
 
-  return results.slice(0, topK).map(result => ({
-    id: result.id,
-    text: result.text,
-    metadata: result.metadata,
-    similarity: result.similarity
+  return (data || []).map(row => ({
+    id: row.id,
+    text: row.content,
+    metadata: {
+      number: row.issue_number,
+      title: row.title,
+      state: row.state,
+      labels: row.labels || [],
+      url: row.url,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      linked_prs: row.linked_prs || [],
+    },
+    similarity: row.similarity,
   }));
 }
 
 export function extractIssueNumbers(text) {
-  // Match patterns like #1234 or "issue 1234" or "issue #1234"
   const patterns = [
-    /#(\d+)/g,                           // #1234
-    /issue\s+#?(\d+)/gi,                 // issue 1234, issue #1234
-    /issues?\s+#?(\d+)/gi,               // issues 1234
-    /\b(\d{4,})\b/g,                     // standalone 4+ digit numbers (likely issue/PR numbers)
+    /#(\d+)/g,
+    /issue\s+#?(\d+)/gi,
+    /issues?\s+#?(\d+)/gi,
+    /\b(\d{4,})\b/g,
   ];
 
   const issueNumbers = new Set();
@@ -77,53 +60,51 @@ export function extractIssueNumbers(text) {
 }
 
 export async function getIssuesByNumber(issueNumbers) {
-  const embeddingsList = await loadEmbeddings();
-  const issues = [];
+  if (issueNumbers.length === 0) return [];
 
-  for (const number of issueNumbers) {
-    const issue = embeddingsList.find(doc => doc.metadata.number === number);
-    if (issue) {
-      issues.push({
-        id: issue.id,
-        text: issue.text,
-        metadata: issue.metadata,
-        similarity: 1.0, // Explicitly requested, so mark as 100% relevant
-        explicit: true
-      });
-    }
-  }
+  const { data, error } = await supabase
+    .from('issues')
+    .select('*')
+    .in('issue_number', issueNumbers);
 
-  return issues;
+  if (error) throw new Error(`getIssuesByNumber error: ${error.message}`);
+
+  return (data || []).map(row => ({
+    id: row.id,
+    text: row.content,
+    metadata: {
+      number: row.issue_number,
+      title: row.title,
+      state: row.state,
+      labels: row.labels || [],
+      url: row.url,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      linked_prs: row.linked_prs || [],
+    },
+    similarity: 1.0,
+    explicit: true,
+  }));
 }
 
 export async function searchSimilarIssuesWithExplicit(query, topK = 5) {
-  // Extract any explicitly mentioned issue numbers
   const explicitIssueNumbers = extractIssueNumbers(query);
-
-  // Get explicitly mentioned issues
   const explicitIssues = await getIssuesByNumber(explicitIssueNumbers);
-
-  // Perform semantic search
   const semanticResults = await searchSimilarIssues(query, topK);
 
-  // Combine results, prioritizing explicit mentions
-  // Remove any semantic results that are already in explicit results
   const explicitNumbers = new Set(explicitIssues.map(i => i.metadata.number));
   const filteredSemanticResults = semanticResults.filter(
     r => !explicitNumbers.has(r.metadata.number)
   );
 
-  // Combine: explicit issues first, then semantic results (up to topK total)
-  const combined = [
+  return [
     ...explicitIssues,
-    ...filteredSemanticResults.slice(0, Math.max(0, topK - explicitIssues.length))
+    ...filteredSemanticResults.slice(0, Math.max(0, topK - explicitIssues.length)),
   ];
-
-  return combined;
 }
 
 export function formatIssuesContext(results) {
-  return results.map((result, index) => {
+  return results.map((result) => {
     const relevanceLabel = result.explicit
       ? 'Explicitly mentioned'
       : `${(result.similarity * 100).toFixed(1)}% match`;

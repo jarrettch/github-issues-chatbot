@@ -1,58 +1,36 @@
-import fs from 'fs/promises';
-import path from 'path';
 import { openai } from '@ai-sdk/openai';
 import { embed } from 'ai';
-
-let embeddings: any[] | null = null;
-
-export async function loadEmbeddings() {
-  if (!embeddings) {
-    console.log('Loading embeddings...');
-    // Get the path relative to the web directory
-    const embeddingsPath = path.join(process.cwd(), '..', 'embeddings.json');
-    console.log('Embeddings path:', embeddingsPath);
-    const data = await fs.readFile(embeddingsPath, 'utf-8');
-    embeddings = JSON.parse(data);
-    console.log(`Loaded ${embeddings.length} embeddings`);
-  }
-  return embeddings;
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dotProduct = 0;
-  let normA = 0;
-  let normB = 0;
-
-  for (let i = 0; i < a.length; i++) {
-    dotProduct += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-
-  return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-}
+import { supabase } from './supabase';
 
 export async function searchSimilarIssues(query: string, topK = 5) {
-  const embeddingsList = await loadEmbeddings();
-
   const embeddingModel = openai.embedding('text-embedding-3-small');
   const { embedding: queryEmbedding } = await embed({
     model: embeddingModel,
-    value: query
+    value: query,
   });
 
-  const results = embeddingsList.map(doc => ({
-    ...doc,
-    similarity: cosineSimilarity(queryEmbedding, doc.embedding)
-  }));
+  const { data, error } = await supabase.rpc('match_issues', {
+    query_embedding: JSON.stringify(queryEmbedding),
+    match_count: topK,
+    match_threshold: 0.15,
+  });
 
-  results.sort((a, b) => b.similarity - a.similarity);
+  if (error) throw new Error(`match_issues RPC error: ${error.message}`);
 
-  return results.slice(0, topK).map(result => ({
-    id: result.id,
-    text: result.text,
-    metadata: result.metadata,
-    similarity: result.similarity
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    text: row.content,
+    metadata: {
+      number: row.issue_number,
+      title: row.title,
+      state: row.state,
+      labels: row.labels || [],
+      url: row.url,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      linked_prs: row.linked_prs || [],
+    },
+    similarity: row.similarity,
   }));
 }
 
@@ -77,23 +55,31 @@ export function extractIssueNumbers(text: string): number[] {
 }
 
 export async function getIssuesByNumber(issueNumbers: number[]) {
-  const embeddingsList = await loadEmbeddings();
-  const issues = [];
+  if (issueNumbers.length === 0) return [];
 
-  for (const number of issueNumbers) {
-    const issue = embeddingsList.find(doc => doc.metadata.number === number);
-    if (issue) {
-      issues.push({
-        id: issue.id,
-        text: issue.text,
-        metadata: issue.metadata,
-        similarity: 1.0,
-        explicit: true
-      });
-    }
-  }
+  const { data, error } = await supabase
+    .from('issues')
+    .select('*')
+    .in('issue_number', issueNumbers);
 
-  return issues;
+  if (error) throw new Error(`getIssuesByNumber error: ${error.message}`);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    text: row.content,
+    metadata: {
+      number: row.issue_number,
+      title: row.title,
+      state: row.state,
+      labels: row.labels || [],
+      url: row.url,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      linked_prs: row.linked_prs || [],
+    },
+    similarity: 1.0,
+    explicit: true,
+  }));
 }
 
 export async function searchSimilarIssuesWithExplicit(query: string, topK = 5) {
@@ -103,21 +89,77 @@ export async function searchSimilarIssuesWithExplicit(query: string, topK = 5) {
 
   const explicitNumbers = new Set(explicitIssues.map(i => i.metadata.number));
   const filteredSemanticResults = semanticResults.filter(
-    r => !explicitNumbers.has(r.metadata.number)
+    (r: any) => !explicitNumbers.has(r.metadata.number)
   );
 
-  const combined = [
+  return [
     ...explicitIssues,
-    ...filteredSemanticResults.slice(0, Math.max(0, topK - explicitIssues.length))
+    ...filteredSemanticResults.slice(0, Math.max(0, topK - explicitIssues.length)),
   ];
+}
 
-  return combined;
+export async function searchAllIssues(query: string) {
+  const queryLower = query.toLowerCase();
+  const stopWords = ['what', 'how', 'many', 'the', 'is', 'are', 'of', 'in', 'to', 'a', 'an'];
+  const queryWords = queryLower
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !stopWords.includes(word));
+
+  // Build a text search filter using Supabase
+  // For each meaningful word, search in content via ilike
+  let dbQuery = supabase
+    .from('issues')
+    .select('id, issue_number, title, state, labels, url, created_at, updated_at, linked_prs, content');
+
+  if (queryWords.length > 0) {
+    // Use OR filter across words matching in content
+    const orFilters = queryWords.map(w => `content.ilike.%${w}%`).join(',');
+    dbQuery = dbQuery.or(orFilters);
+  }
+
+  const { data, error } = await dbQuery;
+
+  if (error) throw new Error(`searchAllIssues error: ${error.message}`);
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    text: row.content,
+    metadata: {
+      number: row.issue_number,
+      title: row.title,
+      state: row.state,
+      labels: row.labels || [],
+      url: row.url,
+      created_at: row.created_at,
+      updated_at: row.updated_at,
+      linked_prs: row.linked_prs || [],
+    },
+    similarity: 0,
+    analytical: true,
+  }));
+}
+
+export async function getTotalIssueCount(): Promise<number> {
+  const { count, error } = await supabase
+    .from('issues')
+    .select('*', { count: 'exact', head: true });
+
+  if (error) throw new Error(`getTotalIssueCount error: ${error.message}`);
+  return count || 0;
+}
+
+export function formatIssuesContextLightweight(results: any[]) {
+  return results
+    .map(result => `#${result.metadata.number}: ${result.metadata.title}`)
+    .join('\n');
 }
 
 export function formatIssuesContext(results: any[]) {
-  return results.map((result) => {
+  return results.map(result => {
     const relevanceLabel = result.explicit
       ? 'Explicitly mentioned'
+      : result.analytical
+      ? 'Retrieved for analysis'
       : `${(result.similarity * 100).toFixed(1)}% match`;
 
     const linkedPRs = result.metadata.linked_prs || [];

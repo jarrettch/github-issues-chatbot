@@ -5,9 +5,7 @@
   "description": "GitHub Issues RAG Chatbot using Vercel AI SDK",
   "main": "index.js",
   "scripts": {
-    "fetch-issues": "node fetch-issues.js",
-    "generate-embeddings": "node generate-embeddings.js",
-    "setup": "npm run fetch-issues && npm run generate-embeddings",
+    "sync": "npx tsx scripts/sync-issues.ts",
     "chat": "node chatbot.js",
     "example": "node example.js",
     "web": "cd web && npm run dev"
@@ -16,9 +14,11 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@ai-sdk/anthropic": "^1.0.0",
     "@ai-sdk/openai": "^1.0.0",
-    "ai": "^4.0.0",
     "@octokit/rest": "^21.0.0",
+    "@supabase/supabase-js": "^2.0.0",
+    "ai": "^4.0.0",
     "dotenv": "^16.4.0"
   }
 }
