@@ -5,7 +5,7 @@
   "description": "GitHub Issues RAG Chatbot using Vercel AI SDK",
   "main": "index.js",
   "scripts": {
-    "sync": "npx tsx scripts/sync-issues.ts",
+    "sync": "cd web && npx tsx scripts/sync-issues.ts",
     "chat": "node chatbot.js",
     "example": "node example.js",
     "web": "cd web && npm run dev"

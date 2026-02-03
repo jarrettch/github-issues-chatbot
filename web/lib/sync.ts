@@ -1,24 +1,23 @@
 import { Octokit } from '@octokit/rest';
-import { createClient } from '@supabase/supabase-js';
 import { openai } from '@ai-sdk/openai';
 import { embedMany } from 'ai';
-import dotenv from 'dotenv';
+import { createClient } from '@supabase/supabase-js';
 
-dotenv.config();
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
-
-const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+// --- Helper functions ---
 
 function extractPRLinks(text: string | null): number[] {
   if (!text) return [];
   const prNumbers = new Set<number>();
+  let match;
 
   const urlPattern = /https?:\/\/github\.com\/vercel\/ai\/pull\/(\d+)/g;
-  let match;
   while ((match = urlPattern.exec(text)) !== null) {
     prNumbers.add(parseInt(match[1], 10));
   }
@@ -36,21 +35,30 @@ function extractPRLinks(text: string | null): number[] {
   return Array.from(prNumbers);
 }
 
+function extractIssueNumbersFromBody(text: string): number[] {
+  const issueNumbers = new Set<number>();
+  const keywordPattern = /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)/gi;
+  let match;
+  while ((match = keywordPattern.exec(text)) !== null) {
+    issueNumbers.add(parseInt(match[1], 10));
+  }
+  return Array.from(issueNumbers);
+}
+
 function truncateText(text: string, maxTokens = 7000): string {
-  // ~2.5 chars per token is conservative but avoids 8192 token limit
   const maxChars = Math.floor(maxTokens * 1.5);
   if (text.length <= maxChars) return text;
   return text.slice(0, maxChars) + '\n\n[... truncated for length ...]';
+}
+
+function sanitize(s: string): string {
+  return s.replace(/\0/g, '').replace(/\\u0000/g, '').replace(/\x00/g, '');
 }
 
 function buildContent(issue: any, comments: any[]): string {
   const commentsText = comments
     .map((c: any) => `Comment by ${c.user}: ${c.body}`)
     .join('\n\n');
-
-  // Strip null bytes and invalid Unicode escape sequences
-  // Strip null bytes, null Unicode escapes, and other problematic sequences
-  const sanitize = (s: string) => s.replace(/\0/g, '').replace(/\\u0000/g, '').replace(/\x00/g, '');
 
   return truncateText(sanitize(`
 Title: ${issue.title}
@@ -73,7 +81,7 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
     } catch (err: any) {
       if (err?.status === 403 && err?.response?.headers?.['x-ratelimit-remaining'] === '0') {
         const resetAt = parseInt(err.response.headers['x-ratelimit-reset'], 10) * 1000;
-        const waitMs = Math.max(resetAt - Date.now(), 0) + 5000; // 5s buffer
+        const waitMs = Math.max(resetAt - Date.now(), 0) + 5000;
         const waitMin = Math.ceil(waitMs / 60000);
         console.log(`Rate limited. Waiting ${waitMin} minutes until reset...`);
         await new Promise(resolve => setTimeout(resolve, waitMs));
@@ -84,7 +92,20 @@ async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-export async function syncIssues() {
+export interface SyncOptions {
+  log?: (message: string) => void;
+}
+
+export interface SyncResult {
+  synced: number;
+  total?: number | null;
+}
+
+export async function syncIssues(options: SyncOptions = {}): Promise<SyncResult> {
+  const log = options.log || console.log;
+  const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+  const supabase = getSupabase();
+
   // Read last sync time
   const { data: syncMeta } = await supabase
     .from('sync_metadata')
@@ -93,14 +114,14 @@ export async function syncIssues() {
     .single();
 
   const lastSyncedAt = syncMeta?.last_synced_at || null;
-  console.log(`Last synced at: ${lastSyncedAt || 'never (full sync)'}`);
+  log(`Last synced at: ${lastSyncedAt || 'never (full sync)'}`);
 
   const allIssues: any[] = [];
   const prToIssueMap = new Map<number, number[]>();
   let page = 1;
   const perPage = 100;
 
-  // Fetch issues with pagination — no cap
+  // Fetch issues with pagination
   while (true) {
     const params: any = {
       owner: 'vercel',
@@ -116,7 +137,7 @@ export async function syncIssues() {
     const { data: issues } = await withRateLimitRetry(() => octokit.rest.issues.listForRepo(params));
     if (issues.length === 0) break;
 
-    console.log(`Fetched page ${page} (${issues.length} items)`);
+    log(`Fetched page ${page} (${issues.length} items)`);
 
     for (const issue of issues) {
       // If it's a PR, extract referenced issues then skip
@@ -138,8 +159,8 @@ export async function syncIssues() {
       }
 
       let linkedPRs = new Set<number>();
-      extractPRLinks(issue.body).forEach(pr => linkedPRs.add(pr));
-      comments.forEach(c => extractPRLinks(c.body).forEach(pr => linkedPRs.add(pr)));
+      extractPRLinks(issue.body ?? null).forEach(pr => linkedPRs.add(pr));
+      comments.forEach(c => extractPRLinks(c.body ?? null).forEach(pr => linkedPRs.add(pr)));
 
       const formattedComments = comments.map(c => ({
         body: c.body,
@@ -180,10 +201,10 @@ export async function syncIssues() {
     }
   }
 
-  console.log(`\nTotal issues to sync: ${allIssues.length}`);
+  log(`Total issues to sync: ${allIssues.length}`);
 
   if (allIssues.length === 0) {
-    console.log('No new issues to sync.');
+    log('No new issues to sync.');
     return { synced: 0 };
   }
 
@@ -193,7 +214,7 @@ export async function syncIssues() {
 
   for (let i = 0; i < allIssues.length; i += batchSize) {
     const batch = allIssues.slice(i, i + batchSize);
-    console.log(`Generating embeddings batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(allIssues.length / batchSize)}...`);
+    log(`Generating embeddings batch ${Math.floor(i / batchSize) + 1}/${Math.ceil(allIssues.length / batchSize)}...`);
 
     try {
       const { embeddings } = await embedMany({
@@ -201,7 +222,6 @@ export async function syncIssues() {
         values: batch.map(issue => issue.content),
       });
 
-      // Upsert batch into Supabase
       const rows = batch.map((issue, idx) => ({
         ...issue,
         embedding: JSON.stringify(embeddings[idx]),
@@ -213,11 +233,11 @@ export async function syncIssues() {
         .upsert(rows, { onConflict: 'issue_number' });
 
       if (error) {
-        console.error(`Upsert error on batch ${Math.floor(i / batchSize) + 1}:`, error.message);
+        log(`Upsert error on batch ${Math.floor(i / batchSize) + 1}: ${error.message}`);
       }
     } catch (err: any) {
-      console.error(`Embedding error on batch ${Math.floor(i / batchSize) + 1}:`, err.message);
-      console.log('Falling back to individual processing...');
+      log(`Embedding error on batch ${Math.floor(i / batchSize) + 1}: ${err.message}`);
+      log('Falling back to individual processing...');
 
       // Process each issue individually so one bad one doesn't kill the batch
       for (const issue of batch) {
@@ -229,9 +249,9 @@ export async function syncIssues() {
           const { error } = await supabase
             .from('issues')
             .upsert([{ ...issue, embedding: JSON.stringify(embeddings[0]), synced_at: new Date().toISOString() }], { onConflict: 'issue_number' });
-          if (error) console.error(`  Upsert error for #${issue.issue_number}:`, error.message);
+          if (error) log(`  Upsert error for #${issue.issue_number}: ${error.message}`);
         } catch (e: any) {
-          console.error(`  Skipping issue #${issue.issue_number}: ${e.message.slice(0, 80)}`);
+          log(`  Skipping issue #${issue.issue_number}: ${e.message.slice(0, 80)}`);
         }
       }
     }
@@ -250,22 +270,6 @@ export async function syncIssues() {
     })
     .eq('id', 1);
 
-  console.log(`\nSync complete. ${allIssues.length} issues synced. Total in DB: ${count}`);
+  log(`Sync complete. ${allIssues.length} issues synced. Total in DB: ${count}`);
   return { synced: allIssues.length, total: count };
-}
-
-function extractIssueNumbersFromBody(text: string): number[] {
-  const issueNumbers = new Set<number>();
-  const keywordPattern = /(?:fix(?:es|ed)?|close(?:s|d)?|resolve(?:s|d)?)\s+#(\d+)/gi;
-  let match;
-  while ((match = keywordPattern.exec(text)) !== null) {
-    issueNumbers.add(parseInt(match[1], 10));
-  }
-  return Array.from(issueNumbers);
-}
-
-// Run directly if invoked as a script
-const isMainModule = process.argv[1]?.endsWith('sync-issues.ts') || process.argv[1]?.endsWith('sync-issues.js');
-if (isMainModule) {
-  syncIssues().catch(console.error);
 }
