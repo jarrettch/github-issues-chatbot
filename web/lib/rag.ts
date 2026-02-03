@@ -1,8 +1,30 @@
 import { openai } from '@ai-sdk/openai';
 import { embed } from 'ai';
 import { supabase } from './supabase';
+import type { Database } from './database.types';
 
-export async function searchSimilarIssues(query: string, topK = 5) {
+type MatchIssueResult = Database['public']['Functions']['match_issues']['Returns'][number];
+type IssueRow = Database['public']['Tables']['issues']['Row'];
+
+interface IssueResult {
+  id: number;
+  text: string;
+  metadata: {
+    number: number;
+    title: string;
+    state: string;
+    labels: string[];
+    url: string | null;
+    created_at: string | null;
+    updated_at: string | null;
+    linked_prs: number[];
+  };
+  similarity: number;
+  explicit?: boolean;
+  analytical?: boolean;
+}
+
+export async function searchSimilarIssues(query: string, topK = 5): Promise<IssueResult[]> {
   const embeddingModel = openai.embedding('text-embedding-3-small');
   const { embedding: queryEmbedding } = await embed({
     model: embeddingModel,
@@ -17,7 +39,7 @@ export async function searchSimilarIssues(query: string, topK = 5) {
 
   if (error) throw new Error(`match_issues RPC error: ${error.message}`);
 
-  return (data || []).map((row: any) => ({
+  return (data || []).map((row: MatchIssueResult) => ({
     id: row.id,
     text: row.content,
     metadata: {
@@ -54,7 +76,7 @@ export function extractIssueNumbers(text: string): number[] {
   return Array.from(issueNumbers);
 }
 
-export async function getIssuesByNumber(issueNumbers: number[]) {
+export async function getIssuesByNumber(issueNumbers: number[]): Promise<IssueResult[]> {
   if (issueNumbers.length === 0) return [];
 
   const { data, error } = await supabase
@@ -64,7 +86,7 @@ export async function getIssuesByNumber(issueNumbers: number[]) {
 
   if (error) throw new Error(`getIssuesByNumber error: ${error.message}`);
 
-  return (data || []).map((row: any) => ({
+  return (data || []).map((row: IssueRow) => ({
     id: row.id,
     text: row.content,
     metadata: {
@@ -82,14 +104,14 @@ export async function getIssuesByNumber(issueNumbers: number[]) {
   }));
 }
 
-export async function searchSimilarIssuesWithExplicit(query: string, topK = 5) {
+export async function searchSimilarIssuesWithExplicit(query: string, topK = 5): Promise<IssueResult[]> {
   const explicitIssueNumbers = extractIssueNumbers(query);
   const explicitIssues = await getIssuesByNumber(explicitIssueNumbers);
   const semanticResults = await searchSimilarIssues(query, topK);
 
   const explicitNumbers = new Set(explicitIssues.map(i => i.metadata.number));
   const filteredSemanticResults = semanticResults.filter(
-    (r: any) => !explicitNumbers.has(r.metadata.number)
+    r => !explicitNumbers.has(r.metadata.number)
   );
 
   return [
@@ -98,21 +120,18 @@ export async function searchSimilarIssuesWithExplicit(query: string, topK = 5) {
   ];
 }
 
-export async function searchAllIssues(query: string) {
+export async function searchAllIssues(query: string): Promise<IssueResult[]> {
   const queryLower = query.toLowerCase();
   const stopWords = ['what', 'how', 'many', 'the', 'is', 'are', 'of', 'in', 'to', 'a', 'an'];
   const queryWords = queryLower
     .split(/\s+/)
     .filter(word => word.length > 2 && !stopWords.includes(word));
 
-  // Build a text search filter using Supabase
-  // For each meaningful word, search in content via ilike
   let dbQuery = supabase
     .from('issues')
     .select('id, issue_number, title, state, labels, url, created_at, updated_at, linked_prs, content');
 
   if (queryWords.length > 0) {
-    // Use OR filter across words matching in content
     const orFilters = queryWords.map(w => `content.ilike.%${w}%`).join(',');
     dbQuery = dbQuery.or(orFilters);
   }
@@ -121,7 +140,7 @@ export async function searchAllIssues(query: string) {
 
   if (error) throw new Error(`searchAllIssues error: ${error.message}`);
 
-  return (data || []).map((row: any) => ({
+  return (data || []).map(row => ({
     id: row.id,
     text: row.content,
     metadata: {
@@ -148,13 +167,13 @@ export async function getTotalIssueCount(): Promise<number> {
   return count || 0;
 }
 
-export function formatIssuesContextLightweight(results: any[]) {
+export function formatIssuesContextLightweight(results: IssueResult[]): string {
   return results
     .map(result => `#${result.metadata.number}: ${result.metadata.title}`)
     .join('\n');
 }
 
-export function formatIssuesContext(results: any[]) {
+export function formatIssuesContext(results: IssueResult[]): string {
   return results.map(result => {
     const relevanceLabel = result.explicit
       ? 'Explicitly mentioned'
@@ -164,7 +183,7 @@ export function formatIssuesContext(results: any[]) {
 
     const linkedPRs = result.metadata.linked_prs || [];
     const prLinks = linkedPRs.length > 0
-      ? linkedPRs.map((pr: number) => `https://github.com/vercel/ai/pull/${pr}`).join(', ')
+      ? linkedPRs.map(pr => `https://github.com/vercel/ai/pull/${pr}`).join(', ')
       : 'None';
 
     return `
