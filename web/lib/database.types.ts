@@ -66,6 +66,7 @@ export type Database = {
           issue_number: number
           labels: string[] | null
           linked_prs: number[] | null
+          notified_at: string | null
           state: string
           synced_at: string | null
           title: string
@@ -84,6 +85,7 @@ export type Database = {
           issue_number: number
           labels?: string[] | null
           linked_prs?: number[] | null
+          notified_at?: string | null
           state: string
           synced_at?: string | null
           title: string
@@ -102,6 +104,7 @@ export type Database = {
           issue_number?: number
           labels?: string[] | null
           linked_prs?: number[] | null
+          notified_at?: string | null
           state?: string
           synced_at?: string | null
           title?: string

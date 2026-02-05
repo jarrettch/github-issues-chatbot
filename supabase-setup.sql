@@ -16,7 +16,8 @@ create table issues (
   linked_prs integer[] default '{}',
   content text not null,           -- combined text for RAG
   embedding vector(1536),
-  synced_at timestamptz default now()
+  synced_at timestamptz default now(),
+  notified_at timestamptz           -- when notification was sent for this issue
 );
 
 create index on issues using ivfflat (embedding vector_cosine_ops) with (lists = 100);

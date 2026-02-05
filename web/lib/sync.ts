@@ -1,7 +1,8 @@
 import { Octokit } from '@octokit/rest';
 import { openai } from '@ai-sdk/openai';
-import { embedMany } from 'ai';
+import { embedMany, generateObject } from 'ai';
 import { createClient } from '@supabase/supabase-js';
+import { z } from 'zod';
 import type { Database } from './database.types';
 
 function getSupabase() {
@@ -100,6 +101,167 @@ export interface SyncOptions {
 export interface SyncResult {
   synced: number;
   total?: number | null;
+  notified?: number;
+}
+
+interface ProcessedIssue {
+  issue_number: number;
+  title: string;
+  body: string;
+  state: string;
+  labels: string[];
+  author: string;
+  url: string;
+  created_at: string;
+  updated_at: string;
+  comments_count: number;
+  comments: { body: string | null | undefined; user: string; created_at: string }[];
+  linked_prs: number[];
+  content: string;
+}
+
+const URGENT_LABELS = ['bug', 'critical', 'urgent', 'breaking', 'regression', 'security'];
+
+function hasUrgentLabel(labels: string[]): boolean {
+  return labels.some(l => URGENT_LABELS.includes(l.toLowerCase()));
+}
+
+async function checkSemanticUrgency(issue: ProcessedIssue, log: (msg: string) => void): Promise<boolean> {
+  try {
+    const { object } = await generateObject({
+      model: openai('gpt-4o-mini'),
+      schema: z.object({
+        isUrgent: z.boolean(),
+        reason: z.string(),
+      }),
+      prompt: `Analyze this GitHub issue and determine if it describes an urgent problem that needs immediate attention. Urgent issues include: critical bugs, production outages, security vulnerabilities, breaking changes, or data loss scenarios.
+
+Title: ${issue.title}
+Body: ${issue.body?.slice(0, 1000) || 'No description'}
+
+Return isUrgent: true only if this clearly describes a critical/urgent problem.`,
+    });
+    if (object.isUrgent) {
+      log(`Semantic urgency reason: ${object.reason}`);
+    }
+    return object.isUrgent;
+  } catch (err: any) {
+    log(`Semantic urgency check failed: ${err.message}`);
+    return false;
+  }
+}
+
+async function shouldNotify(
+  issue: ProcessedIssue,
+  existingIssue: { notified_at: string | null; labels: string[] | null } | null,
+  log: (msg: string) => void
+): Promise<boolean> {
+  // Test mode - notify on all new issues
+  if (process.env.NOTIFICATION_TEST_MODE === 'true') {
+    if (!existingIssue) {
+      log(`Test mode: notifying for new issue #${issue.issue_number}`);
+      return true;
+    }
+    return false;
+  }
+
+  // Already notified - check if urgent label was just added
+  if (existingIssue?.notified_at) {
+    const hadUrgentLabel = existingIssue.labels ? hasUrgentLabel(existingIssue.labels) : false;
+    const hasUrgentLabelNow = hasUrgentLabel(issue.labels);
+    if (!hadUrgentLabel && hasUrgentLabelNow) {
+      log(`Issue #${issue.issue_number} just got an urgent label, will notify`);
+      return true;
+    }
+    return false;
+  }
+
+  // New issue or not yet notified - check labels first
+  if (hasUrgentLabel(issue.labels)) {
+    log(`Issue #${issue.issue_number} has urgent label`);
+    return true;
+  }
+
+  // No urgent labels - check semantically
+  log(`Issue #${issue.issue_number} has no urgent labels, checking semantically...`);
+  const isUrgent = await checkSemanticUrgency(issue, log);
+  if (isUrgent) {
+    log(`Issue #${issue.issue_number} flagged as semantically urgent`);
+  }
+  return isUrgent;
+}
+
+async function sendNotification(issue: ProcessedIssue | null, log: (msg: string) => void, syncSummary?: string): Promise<boolean> {
+  const webhookUrl = process.env.NOTIFICATION_WEBHOOK_URL;
+  if (!webhookUrl) {
+    log('NOTIFICATION_WEBHOOK_URL not set, skipping notification');
+    return false;
+  }
+
+  // Test mode summary notification (no specific issue)
+  if (!issue && syncSummary) {
+    const payload = {
+      embeds: [{
+        title: 'Sync Complete (Test Mode)',
+        color: 0x00ff00,
+        description: syncSummary,
+        timestamp: new Date().toISOString(),
+      }],
+    };
+
+    try {
+      const response = await fetch(webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        log(`Test notification failed: ${response.status} ${response.statusText}`);
+        return false;
+      }
+      log('Test sync summary notification sent');
+      return true;
+    } catch (err: any) {
+      log(`Test notification error: ${err.message}`);
+      return false;
+    }
+  }
+
+  if (!issue) return false;
+
+  const isUrgentLabel = hasUrgentLabel(issue.labels);
+  const payload = {
+    content: isUrgentLabel ? '@here New urgent issue!' : null,
+    embeds: [{
+      title: `#${issue.issue_number}: ${issue.title}`,
+      url: issue.url,
+      color: isUrgentLabel ? 0xff0000 : 0xffa500, // Red for labeled urgent, orange for semantic
+      fields: [
+        { name: 'State', value: issue.state, inline: true },
+        { name: 'Author', value: issue.author, inline: true },
+        { name: 'Labels', value: issue.labels.join(', ') || 'None', inline: true },
+      ],
+      description: issue.body?.slice(0, 500) || 'No description',
+      timestamp: issue.created_at,
+    }],
+  };
+
+  try {
+    const response = await fetch(webhookUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) {
+      log(`Notification failed: ${response.status} ${response.statusText}`);
+      return false;
+    }
+    log(`Notification sent for issue #${issue.issue_number}`);
+    return true;
+  } catch (err: any) {
+    log(`Notification error: ${err.message}`);
+    return false;
+  }
 }
 
 export async function syncIssues(options: SyncOptions = {}): Promise<SyncResult> {
@@ -206,7 +368,48 @@ export async function syncIssues(options: SyncOptions = {}): Promise<SyncResult>
 
   if (allIssues.length === 0) {
     log('No new issues to sync.');
-    return { synced: 0 };
+    // In test mode, send a summary notification even with no new issues
+    if (process.env.NOTIFICATION_TEST_MODE === 'true') {
+      await sendNotification(null, log, 'No new or updated issues found.');
+    }
+    return { synced: 0, notified: 0 };
+  }
+
+  // Get existing issues to check notification status
+  const issueNumbers = allIssues.map(i => i.issue_number);
+  const { data: existingIssues } = await supabase
+    .from('issues')
+    .select('issue_number, notified_at, labels')
+    .in('issue_number', issueNumbers);
+
+  const existingMap = new Map(
+    (existingIssues || []).map(i => [i.issue_number, { notified_at: i.notified_at, labels: i.labels }])
+  );
+
+  // Check which issues need notifications
+  let notifiedCount = 0;
+  const issuesToNotify: ProcessedIssue[] = [];
+
+  for (const issue of allIssues) {
+    const existing = existingMap.get(issue.issue_number) || null;
+    if (await shouldNotify(issue, existing, log)) {
+      issuesToNotify.push(issue);
+    }
+  }
+
+  // Send notifications
+  for (const issue of issuesToNotify) {
+    const sent = await sendNotification(issue, log);
+    if (sent) {
+      notifiedCount++;
+      // Mark as notified in the issue object (will be saved during upsert)
+      (issue as any).notified_at = new Date().toISOString();
+    }
+  }
+
+  // In test mode with no urgent issues, send summary
+  if (process.env.NOTIFICATION_TEST_MODE === 'true' && notifiedCount === 0) {
+    await sendNotification(null, log, `Synced ${allIssues.length} issues, none were new.`);
   }
 
   // Generate embeddings in batches of 100
@@ -271,6 +474,6 @@ export async function syncIssues(options: SyncOptions = {}): Promise<SyncResult>
     })
     .eq('id', 1);
 
-  log(`Sync complete. ${allIssues.length} issues synced. Total in DB: ${count}`);
-  return { synced: allIssues.length, total: count };
+  log(`Sync complete. ${allIssues.length} issues synced. Total in DB: ${count}. Notified: ${notifiedCount}`);
+  return { synced: allIssues.length, total: count, notified: notifiedCount };
 }
